@@ -1,5 +1,4 @@
 import numpy as np
-import tqdm
 import time
 import torch
 import torch.nn as nn
@@ -7,40 +6,12 @@ import math
 import torch.nn.functional as F
 from gaussian_logit_sampling import GaussianLogitSampler
 from dataloader import DataLoader
+from torch.nn import BCELoss
+from tqdm import tqdm
 
 LEARNING_RATE = 0.0001
 BETA_1 = 0.9
-
-# Number of workers for dataloader
-workers = 2
-
-# Batch size during training
-batch_size = 128
-
-# Spatial size of training images. All images will be resized to this
-#   size using a transformer.
-image_size = 64
-
-# Number of channels in the training images. For color images this is 3
-nc = 3
-
-# Size of z latent vector (i.e. size of generator input)
-nz = 100
-
-# Size of feature maps in generator
-ngf = 64
-
-# Size of feature maps in discriminator
-ndf = 64
-
-# Number of training epochs
-num_epochs = 5
-
-# Learning rate for optimizers
-lr = 0.0002
-
-# Beta1 hyperparam for Adam optimizers
-beta1 = 0.5
+LOSS_WEIGHTS = 1.0, 0.01
 
 # Number of GPUs available. Use 0 for CPU mode.
 ngpu = 1
@@ -173,7 +144,8 @@ class discriminator(nn.Module):
         x = torch.flatten(x,start_dim=1)
         x = F.relu(self.dense1(x))
         x = F.relu(self.dense2(x))
-        x = F.softmax(self.dense3(x))
+        x = self.dense3(x)
+        x = torch.sigmoid(x)
 
         return x
 
@@ -184,14 +156,26 @@ class discriminator(nn.Module):
                 m.weight.data.normal_(0, math.sqrt(2. / n))
 
 
+def mae_plus_derv_cvae_loss(true, pred):
+    true_x_1 = torch.cat([true[:,:,1:,:], torch.zeros_like(true[:,:,0:1,:])], axis=2)
+    true_y_1 = torch.cat([true[:,:,:,1:], torch.zeros_like(true[:,:,:,0:1])], axis=3)
+
+    pred_x_1 = torch.cat([pred[:,:,1:,:], torch.zeros_like(pred[:,:,0:1,:])], axis=2)
+    pred_y_1 = torch.cat([pred[:,:,:,1:], torch.zeros_like(pred[:,:,:,0:1])], axis=3)
+
+    diff_x_true = torch.abs(true - true_x_1)
+    diff_y_true = torch.abs(true - true_y_1) 
+    diff_x_pred = torch.abs(pred - pred_x_1)
+    diff_y_pred = torch.abs(pred - pred_y_1) 
+
+    diff_der = torch.abs(diff_x_true - diff_x_pred) + torch.abs(diff_y_true - diff_y_pred)
+    return 1.0 * torch.mean(torch.abs(pred - true), dim=1) + torch.mean(diff_der, dim=1)
 
 
 netG = generator(24,4).to(device)
 netD = discriminator(24,4).to(device)
 optimizerD = torch.optim.Adam(netD.parameters(), lr=LEARNING_RATE)
 optimizerG = torch.optim.Adam(netG.parameters(), lr=LEARNING_RATE)
-criterionG = torch.nn.BCELoss()
-criterionD = torch.nn.BCELoss()
 
 batch_size = 1
 
@@ -213,7 +197,7 @@ epochs = 50
 for _ in range(epochs):
     steps = 4000
     start = time.time()
-    for step in tqdm.tqdm(range(1, steps+1)):
+    for step in tqdm(range(1, steps+1)):
         # -----------------------------------------------------------------------
         # Train Discriminator for Synthetic Likelihood
         # -----------------------------------------------------------------------
@@ -222,9 +206,9 @@ for _ in range(epochs):
         netD.zero_grad()
 
         data_X_s_batch = np.moveaxis(data_X_s_batch,-1,1)
-        data_X_s_batch = torch.tensor(data_X_s_batch, device=device,dtype=torch.float32)
+        data_X_s_batch = torch.tensor(data_X_s_batch, device=device, dtype=torch.float32)
         data_Y_batch = np.moveaxis(data_Y_batch,-1,1)
-        data_Y_batch = torch.tensor(data_Y_batch, device=device,dtype=torch.float32)
+        data_Y_batch = torch.tensor(data_Y_batch, device=device, dtype=torch.float32)
 
         generated_y = netG(data_X_s_batch)
         data_Y_batch_wc = torch.cat([data_X_s_batch,data_Y_batch], dim=1)
@@ -234,14 +218,15 @@ for _ in range(epochs):
         y = np.zeros([2*batch_size,2]) + np.random.uniform(0,0.05,size=(2*batch_size,2))
         y[0:batch_size,1] = 1 - np.random.uniform(0,0.05,size=(batch_size,))
         y[batch_size:,0] = 1 - np.random.uniform(0,0.05,size=(batch_size,))
+        y = torch.tensor(y, device=device, dtype=torch.float32).view(-1)
         d_out = netD(X).view(-1)
-        d_err = criterionD(d_out, y)
+        d_err = BCELoss()(d_out, y)
 
         l_loss_d.append(d_err.item())
         if len(l_loss_d) > 1000:
             l_loss_d.pop(0)
 
-        d_err.backward()
+        d_err.backward(retain_graph=True)
         optimizerD.step()
 
         # -----------------------------------------------------------------------
@@ -249,13 +234,15 @@ for _ in range(epochs):
         # -----------------------------------------------------------------------
         netG.zero_grad()
 
-        data_X_s_batch, data_X_o_batch, data_Y_batch = dataloader.train_data_batch()
+        # data_X_s_batch, data_X_o_batch, data_Y_batch = dataloader.train_data_batch()
 
         y2 = np.zeros([batch_size,2])
         y2[:,1] = 1 - np.random.uniform(0,0.05,size=(batch_size,))
+        y2 = torch.tensor(y2, device=device, dtype=torch.float32).view(-1)
 
-        g_out = netG([data_X_s_batch, data_X_o_batch, data_X_s_batch]).view(-1)
-        g_err = criterionG(g_out, [data_Y_batch, y2])
+        g_out = netD(generated_y_wc).view(-1)
+        g_err1 = mae_plus_derv_cvae_loss(data_Y_batch, generated_y) * LOSS_WEIGHTS[0]
+        g_err = g_err1.mean() + BCELoss()(g_out, y2) * LOSS_WEIGHTS[1]
         l_loss_g.append(g_err.item())
         if len(l_loss_g) > 1000:
             l_loss_g.pop(0)
@@ -264,5 +251,5 @@ for _ in range(epochs):
         optimizerG.step()
 
 
-        if step % 10 == 0:
+        if step % 100 == 0:
             tqdm.write('Step: ' + str(step) + ' -- Loss - D: ' + str(np.mean(np.array(l_loss_d))) + ' -- Loss - G: ' + str(np.mean(np.array(l_loss_g), axis=0)))

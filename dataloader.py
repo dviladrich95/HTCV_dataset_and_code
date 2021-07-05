@@ -1,5 +1,6 @@
 import numpy as np
 import h5py
+import os
 from tqdm import tqdm
 import random
 
@@ -8,27 +9,35 @@ from PIL import Image
 import io
 
 
+DIR = os.path.dirname(os.path.abspath(__file__))
+TRAIN_IMG = os.path.join(DIR, './dataset1/train_sequence_img.pkl')
+VAL_IMG = os.path.join(DIR, './dataset1/val_sequence_img.pkl')
+TRAIN_ODO = os.path.join(DIR, './dataset1/train_sequence_odo.pkl')
+VAL_ODO = os.path.join(DIR, './dataset1/val_sequence_odo.pkl')
+TRAIN_DATA = os.path.join(DIR, './dataset1/train_data_256_128.h5')
+VAL_DATA = os.path.join(DIR, './dataset1/val_data_256_128.h5')
+
 class DataLoader:
 
 	def __init__(self, batch_size):
 		print('Loading img sequence  ...')
-		with open('./dataset1/train_sequence_img.pkl', 'rb') as f:
+		with open(TRAIN_IMG, 'rb') as f:
 			self.all_im_seq_train = pickle.load(f)
-		with open('./dataset1/val_sequence_img.pkl', 'rb') as f:
+		with open(VAL_IMG, 'rb') as f:
 			self.all_im_seq_val = pickle.load(f)    
 		print('Done.')
 
 		print('Loading odo data ...')
-		with open('./dataset1/train_sequence_odo.pkl', 'rb') as f:
+		with open(TRAIN_ODO, 'rb') as f:
 			self.train_odo_data = pickle.load(f)
-		with open('./dataset1/val_sequence_odo.pkl', 'rb') as f:
+		with open(VAL_ODO, 'rb') as f:
 			self.val_odo_data = pickle.load(f)    
 		print('Done.')
         
 		print('Loading trian img data ...')
-		self.train_data_file = './dataset1/train_data_256_128.h5'
+		self.train_data_file = TRAIN_DATA
 		print('Loading val img data ...')      
-		self.val_data_file = './dataset1/val_data_256_128.h5'
+		self.val_data_file = VAL_DATA
 		print('Done.')
 
 # 		with h5py.File( self.train_data_file, 'r') as f:
